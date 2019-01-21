@@ -1,0 +1,27 @@
+//--------------------------------------------------------------------------------------------------
+/**
+ * Component definition file for the mangOH Yellow using the buzzer
+ */
+//--------------------------------------------------------------------------------------------------
+cflags:
+{
+-std=c99
+-DMANGOH_BOARD=YELLOW
+}
+
+
+requires:
+{
+    api:
+    {
+
+        dhubIO = io.api
+    }
+
+}
+
+sources:
+{
+    buzzer.c
+}
+

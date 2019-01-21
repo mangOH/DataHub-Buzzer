@@ -1,0 +1,28 @@
+sandboxed: false
+start: auto
+version: 0.1
+
+executables:
+{
+    buzzer = (buzzerComponent)
+}
+
+processes:
+{
+    run:
+    {
+        ( buzzer)
+    }
+
+    envVars:
+    {
+        LE_LOG_LEVEL = DEBUG
+    }
+    faultAction: stopApp
+}
+
+
+bindings:
+{
+  buzzer.buzzerComponent.dhubIO  ->  dataHub.io
+}
