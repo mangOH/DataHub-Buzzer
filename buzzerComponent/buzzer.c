@@ -15,10 +15,10 @@
 #define ARRAY_SIZE(array) ((unsigned long) (sizeof (array) / sizeof ((array)[0])))
 #endif
 // #define RES_PATH_BUZZER			"buzzer"
-#define RES_PATH_ENABLE 		"enable"
+#define RES_PATH_ENABLE 		"buzzerenable"
 #define RES_PATH_FREQ_OUTPUT 		"frequency"
 #define RES_PATH_FREQ_INPUT 		RES_PATH_FREQ_OUTPUT "/value"
-#define RES_PATH_PERIOD_OUTPUT 		"period"
+#define RES_PATH_PERIOD_OUTPUT 		"buzzerperiod"
 #define RES_PATH_PERIOD_INPUT 		RES_PATH_PERIOD_OUTPUT "/value"
 #define RES_PATH_DC_ON_OUTPUT 		"duty-cycle-on-interval"
 #define RES_PATH_DC_ON_INPUT 		RES_PATH_DC_ON_OUTPUT "/value"
