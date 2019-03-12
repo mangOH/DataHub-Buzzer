@@ -5,16 +5,14 @@
 //--------------------------------------------------------------------------------------------------
 cflags:
 {
--std=c99
--DMANGOH_BOARD=YELLOW
+    -std=c99
+    -DMANGOH_BOARD=YELLOW
 }
-
 
 requires:
 {
     api:
     {
-
         dhubIO = io.api
     }
 
