@@ -1,7 +1,21 @@
 /**
+ * This component makes the control of the mangOH Yellow's buzzer available through the Data Hub.
  *
- * This file provides the implementation of buzzer frequency selection, period,
- * duty cycle and enable switch.
+ * The buzzer can cycle on and off over a period of time, and the frequency of the buzzer when it
+ * is on (during the ON part of the cycle) can also be controlled independently.
+ *
+ * So, if period = 1 second,
+ *        duty cycle = 20 %,
+ *        frequency = 1024 Hz, and
+ *        enable = true
+ * then the buzzer will emit a 1.024 kHz sound for 200 ms, turn off for 800 ms, and repeat.
+ *
+ * If enable is false, then no sound will be emitted, regardless of the other settings.
+ *
+ * <hr>
+ *
+ * The buzzer is driven by the CLKOUT signal from the RTC chip, which is controlled via a sysfs
+ * file.  A Legato timer is used to implement the on/off duty cycle period.
  *
  * <hr>
  *
@@ -11,278 +25,289 @@
 #include "legato.h"
 #include "interfaces.h"
 
-#ifndef ARRAY_SIZE
-#define ARRAY_SIZE(array) ((unsigned long) (sizeof (array) / sizeof ((array)[0])))
-#endif
+// Data Hub resource paths, relative to the app's root.
+#define RES_PATH_ENABLE     "enable"
+#define RES_PATH_FREQ       "frequency"
+#define RES_PATH_PERIOD     "period"
+#define RES_PATH_DUTY_CYCLE "percent"
 
-#define RES_PATH_ENABLE        "buzzerenable"
-#define RES_PATH_FREQ_OUTPUT   "frequency"
-#define RES_PATH_FREQ_INPUT    RES_PATH_FREQ_OUTPUT "/value"
-#define RES_PATH_PERIOD_OUTPUT "buzzerperiod"
-#define RES_PATH_PERIOD_INPUT  RES_PATH_PERIOD_OUTPUT "/value"
-#define RES_PATH_DC_ON_OUTPUT  "duty-cycle-on-interval"
-#define RES_PATH_DC_ON_INPUT   RES_PATH_DC_ON_OUTPUT "/value"
+/// Frequency to use to turn the buzzer off.
+#define BUZZER_OFF_FREQ 0
 
-#define TURN_OFF_CLKOUT            0x0
+/// Whether the buzzer is enabled or not.
+static bool Enabled = false;
 
-static const char BuzzerFreqPath[]   = "/sys/bus/i2c/drivers/rtc-pcf85063/8-0051/clkout_freq";
+/// The buzzer frequency setpoint in Hz.
+/// @warning This must be one of the valid frequencies, otherwise the driver will reject it.
+static uint Frequency = 1024;
 
-/* To be more generic the ref needs to be a union of the returned dhub PushHandlerRef_t types
- * and PushHandler needs to be a union of different types
- */
-typedef struct actuator_DhResTypes_t {
-    const char        *OutputPath;
-    const char        *InputPath;
-    dhubIO_DataType_t dataType;
-    const char        *units;
-    void              (*OutputHandler)(double, double, void *);
-    void              *ref;     /* Need a union here */
-} actuator_DhResTypes_t;
+// The on percentage of the buzzer on/off duty cycle (0 to 100).
+static uint DutyCycleOnPercent = 50;
 
-static void FreqConfigPushHandler (double timestamp, double freq, void *context);
-static void PeriodConfigPushHandler (double timestamp, double period, void *context);
-static void DcOnConfigPushHandler (double timestamp, double dcOnInterval, void *context);
-static void EnablePushHandler (double timestamp, bool enable, void *context);
-
-/* To be more generic the PushHandler dhub routine should be in the table */
-static actuator_DhResTypes_t dhubResources[] = {
-   {RES_PATH_ENABLE, NULL, DHUBIO_DATA_TYPE_BOOLEAN, "1/0", NULL},
-   {RES_PATH_FREQ_OUTPUT, RES_PATH_FREQ_INPUT, DHUBIO_DATA_TYPE_NUMERIC, "Hz",
-    FreqConfigPushHandler},
-   {RES_PATH_PERIOD_OUTPUT, RES_PATH_PERIOD_INPUT, DHUBIO_DATA_TYPE_NUMERIC, "s",
-    PeriodConfigPushHandler},
-   {RES_PATH_DC_ON_OUTPUT, RES_PATH_DC_ON_INPUT, DHUBIO_DATA_TYPE_NUMERIC, "%",
-    DcOnConfigPushHandler},
-};
-
-// The current frequency of square wave output by the rtc chip to the buzzer
-static int current_freq = 0;
-static int set_freq = 0;
-static FILE *freqFp = NULL;
-
-// The duty cycle percent of being on/off for the buzzer
-static int dc_on = 0;
-
-// The period of the duty cycle
-static int period = 0;
+// The total number of milliseconds in the full duty cycle period (on + off).
+// Must be >= 100 and <= 3600000 (i.e. 1 hour).
+static uint PeriodMs = 2000;
 
 // The timer used to run the duty cycle
 static le_timer_Ref_t Timer = NULL;
-static uint32_t dc_on_timer = 0;
-static uint32_t dc_off_timer = 0;
-static bool buzzer_on = false;
 
-static void SetBuzzer(void)
+// true if the buzzer is currently on (buzzing).
+static bool BuzzerOn = false;
+
+//--------------------------------------------------------------------------------------------------
+/**
+ * Makes the buzzer sound at a given frequency in Hz.
+ */
+//--------------------------------------------------------------------------------------------------
+static void SetBuzzerHz
+(
+    uint freq    ///< The buzzer frequency, in Hz. Use BUZZER_OFF_FREQ to stop the buzzer.
+)
 {
-    if (freqFp == NULL)
+    // Path to the RTC CLKOUT control file in sysfs.
+    static const char BuzzerFreqPath[] = "/sys/bus/i2c/drivers/rtc-pcf85063/8-0051/clkout_freq";
+
+    static FILE *FreqFile = NULL;
+
+    if (FreqFile == NULL)
     {
-        freqFp = fopen(BuzzerFreqPath, "r+");
-        if (freqFp == NULL)
+        FreqFile = fopen(BuzzerFreqPath, "r+");
+        if (FreqFile == NULL)
         {
-            LE_ERROR("Open clkout sysfs file('%s') failed(%d)", BuzzerFreqPath, errno);
-            return;
+            LE_FATAL("Opening file (%s) failed (%m)", BuzzerFreqPath);
         }
     }
 
-    LE_DEBUG("Clkout frequency %d Hz", current_freq);
-
-    if (fprintf(freqFp, "%d", current_freq) == -1)
+    if (fprintf(FreqFile, "%d", freq) == -1)
     {
-        LE_ERROR("Write clkout file('%s') failed (%d)", BuzzerFreqPath, errno);
+        LE_FATAL("Write to file (%s) failed (%m)", BuzzerFreqPath);
     }
 
-    if (fflush(freqFp) == -1)
+    if (fflush(FreqFile) != 0)
     {
-        LE_ERROR("fflush of /sys/bus/i2c/drivers/rtc-pcf85063/8-0051/clkout_freq failed");
+        LE_FATAL("fflush of file (%s) failed (%m)", BuzzerFreqPath);
     }
 }
 
-static void DcHandler(le_timer_Ref_t DcTimerRef)
+//--------------------------------------------------------------------------------------------------
+/**
+ * Start at the beginning of a duty cycle.
+ */
+//--------------------------------------------------------------------------------------------------
+static void StartCycle()
+{
+    SetBuzzerHz(Frequency);
+    BuzzerOn = true;
+    le_timer_SetMsInterval(Timer, PeriodMs * DutyCycleOnPercent / 100);
+    le_timer_Start(Timer);
+}
+
+//--------------------------------------------------------------------------------------------------
+/**
+ * Disable the buzzer, immediately stopping it, even if it's in the middle of a duty cycle.
+ */
+//--------------------------------------------------------------------------------------------------
+static void StopCycle()
 {
     le_timer_Stop(Timer);
-    if (buzzer_on)
+    if (BuzzerOn)
     {
-        le_timer_SetMsInterval(Timer, dc_off_timer);
-        current_freq = TURN_OFF_CLKOUT;
-        SetBuzzer();
-        buzzer_on = false;
-        le_timer_Start(Timer);
+        SetBuzzerHz(BUZZER_OFF_FREQ);
+        BuzzerOn = false;
     }
-    else if (!buzzer_on)
+}
+
+//--------------------------------------------------------------------------------------------------
+/**
+ * Timer expiry handler function.
+ */
+//--------------------------------------------------------------------------------------------------
+static void TimerExpiryHandler(le_timer_Ref_t timer)
+{
+    // If the buzzer is on, it's time to turn it off and adjust the timer for the off period.
+    // Otherwise, it's time to turn it on and restart the timer for the on period.
+    // NOTE: the timer will drift less if we leave it running while we update its interval,
+    // rather than stopping the timer while updating its interval.
+    if (BuzzerOn)
     {
-        le_timer_SetMsInterval(Timer, dc_on_timer);
-        current_freq = set_freq;
-        SetBuzzer();
-        buzzer_on = true;
-        le_timer_Start(Timer);
+        // If the duty cycle is 100%, then just leave the buzzer on.
+        if (DutyCycleOnPercent < 100)
+        {
+            SetBuzzerHz(BUZZER_OFF_FREQ);
+            BuzzerOn = false;
+
+            uint ms = PeriodMs * (100 - DutyCycleOnPercent) / 100;
+            le_timer_SetMsInterval(timer, ms);
+        }
     }
     else
     {
-        LE_ERROR("Illegal state of buzzer");
-    }
-}
-
-static void EnablePushHandler (double timestamp, bool enable, void *context)
-{
-    if (enable)
-    {
-        // We are assuming that set_freq != 0 means that the clkout file is open
-        if (period == 0 || dc_on == 0 || set_freq == 0)
+        // If the duty cycle is 0%, then just leave the buzzer off.
+        if (DutyCycleOnPercent > 0)
         {
-            LE_ERROR("Enable buzzer with either these not set: Period, Duty Cycle, Frequency");
-            return;
-        }
+            SetBuzzerHz(Frequency);
+            BuzzerOn = true;
 
-        dc_on_timer = ((double) dc_on)/100 * period * 1000;
-        dc_off_timer = ((100 - ((double) dc_on))/100) * period * 1000;
-        LE_INFO("period: %d dc_on: %d dc_on_timer: %u dc_off_timer: %u", period, dc_on, dc_on_timer,
-                dc_off_timer);
-        le_timer_SetMsInterval(Timer, dc_on_timer);
-
-        // We start on the duty cycle high
-        buzzer_on = true;
-        if (set_freq == TURN_OFF_CLKOUT)
-        {
-            LE_ERROR("Turning on buzzer with no frequency");
-            return;
-        }
-        current_freq = set_freq;
-        SetBuzzer();
-        le_timer_Start(Timer);
-    }
-
-    if (!enable)
-    {
-        le_timer_Stop(Timer);
-        if (current_freq != TURN_OFF_CLKOUT)
-        {
-            current_freq = TURN_OFF_CLKOUT;
-            SetBuzzer();
+            uint ms = PeriodMs * DutyCycleOnPercent / 100;
+            le_timer_SetMsInterval(timer, ms);
         }
     }
 }
 
-// Note we are not checking the values here, the sysfs interface does.
-static void FreqConfigPushHandler (double timestamp, double freq, void *context)
+//--------------------------------------------------------------------------------------------------
+/**
+ * Handler function for updates to the enable setpoint from the Data Hub.
+ */
+//--------------------------------------------------------------------------------------------------
+static void EnablePushHandler
+(
+    double timestamp,
+    bool enable,
+    void *context
+)
 {
-    set_freq = current_freq = (int) freq;
-    //SetBuzzer();
-    dhubIO_PushNumeric(RES_PATH_FREQ_INPUT, DHUBIO_NOW, freq);
-}
-
-static void PeriodConfigPushHandler (double timestamp, double PeriodConfig, void *context)
-{
-    period = (int) PeriodConfig;
-
-    // Restricting from 2 sec. to 3600 (i.e. 1 hour)
-    if (period < 2 || period > 3600)
+    // Ignore updates that don't change the value.
+    if (enable != Enabled)
     {
-        LE_ERROR("Received invalid PeriodConfig for the Buzzer Duty Cycle - must be between 2 & 3600");
-        return;
+        Enabled = enable;
+
+        if (enable)
+        {
+            StartCycle();
+        }
+        else
+        {
+            StopCycle();
+        }
     }
-    dhubIO_PushNumeric(RES_PATH_PERIOD_INPUT, DHUBIO_NOW, PeriodConfig);
 }
 
-static void DcOnConfigPushHandler (double timestamp, double DcOnInterval, void *context)
+//--------------------------------------------------------------------------------------------------
+/**
+ * Handler function for frequency setpoint updates from the Data Hub.
+ */
+//--------------------------------------------------------------------------------------------------
+static void FrequencyPushHandler (double timestamp, double freq, void *context)
 {
-    dc_on = (int) DcOnInterval;
-
-    if (dc_on < 1 || dc_on > 99)
+    if (freq < 0.0)
     {
-        LE_ERROR("Received invalid DcOnInterval for the Buzzer Duty Cycle - must be between 1 & 99");
+        LE_ERROR("Negative frequency (%lf) ignored.", freq);
         return;
     }
 
-    dhubIO_PushNumeric(RES_PATH_DC_ON_INPUT, DHUBIO_NOW, DcOnInterval);
-}
+    uint intFrequency = (uint)freq;
 
-static le_result_t actuator_DhRegister (void)
-{
-    le_result_t result = LE_OK;
-
-
-    for (int i = 0; i < ARRAY_SIZE(dhubResources); i++)
+    // Don't waste any more time if there's no change in the value.
+    if (Frequency == intFrequency)
     {
-        if (dhubResources[i].OutputPath != NULL)
-            result = dhubIO_CreateOutput(dhubResources[i].OutputPath,
-                                         dhubResources[i].dataType,
-                                         dhubResources[i].units);
-        if (LE_OK != result)
-        {
-            LE_ERROR("Failed to create output resource %s", dhubResources[i].OutputPath);
-            break;
-        }
+        return;
+    }
 
-        dhubIO_MarkOptional(dhubResources[i].OutputPath);
-
-        /* We try to create an Input to keep all listeners apprised of the value change */
-        if (dhubResources[i].InputPath != NULL)
-        {
-            LE_ASSERT(LE_OK == dhubIO_CreateInput(dhubResources[i].InputPath,
-                                                  dhubResources[i].dataType, ""));
-        }
-
-        /* To be more generic the PushHandler dhub routine should be in the table */
-        if (dhubResources[i].OutputHandler != NULL)
-        {
-            //LE_INFO("Adding handler for %s", dhubResources[i].OutputPath);
-            dhubResources[i].ref = dhubIO_AddNumericPushHandler(
-                dhubResources[i].OutputPath, dhubResources[i].OutputHandler, NULL);
-            if (NULL == dhubResources[i].ref)
+    // Only very specific frequencies are supported by the RTC chip:
+    //   1 Hz (below human-audible range)
+    //   1024 Hz
+    //   2048 Hz
+    //   4096 Hz
+    //   8192 Hz
+    //   16384 Hz
+    //   32768 Hz (above human-audible range)
+    switch (intFrequency)
+    {
+        case 1024:
+        case 2048:
+        case 4096:
+        case 8192:
+        case 16384:
+            Frequency = intFrequency;
+            if (BuzzerOn)
             {
-                LE_ERROR("Failed to add handler for output resource %s", dhubResources[i].OutputPath);
-                result = LE_FAULT;
-                break;
+                SetBuzzerHz(Frequency);
+            }
+            break;
+
+        default:
+            LE_ERROR("Frequency %lf Hz is out of range."
+                     " Only 1024, 2048, 4096, 8192, and 16384 accepted.",
+                     freq);
+            break;
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
+/**
+ * Handler function for duty cycle period setpoint updates from the Data Hub.
+ */
+//--------------------------------------------------------------------------------------------------
+static void PeriodPushHandler (double timestamp, double period, void *context)
+{
+    // Restricting from 2 sec. to 3600 (i.e. 1 hour)
+    if (period < 0.1 || period > 3600.0)
+    {
+        LE_ERROR("Received invalid duty cycle period (%lf seconds) - must be between 0.1 & 3600",
+                 period);
+    }
+    else
+    {
+        uint periodMs = (uint)(period * 1000);  // Convert to integer number of milliseconds.
+        if (PeriodMs != periodMs)
+        {
+            PeriodMs = periodMs;
+
+            // If the buzzer is enabled, stop the buzzer and the timer and restart everything.
+            StopCycle();
+            StartCycle();
+        }
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
+/**
+ * Handler function for the duty cycle percent setpoint updates from the Data Hub.
+ */
+//--------------------------------------------------------------------------------------------------
+static void PercentPushHandler (double timestamp, double percent, void *context)
+{
+    if (percent < 0.0 || percent > 100.0)
+    {
+        LE_ERROR("Ignoring invalid duty cycle percentage (%lf) - must be between 0 & 100", percent);
+    }
+    else
+    {
+        uint intPercent = (uint)percent;
+        if (DutyCycleOnPercent != intPercent)
+        {
+            DutyCycleOnPercent = intPercent;
+
+            // If the buzzer is on, it's not too late to update the timer interval in this
+            // cycle.  Otherwise, we have to wait for the off period to end before updating.
+            if (BuzzerOn)
+            {
+                uint ms = PeriodMs * DutyCycleOnPercent / 100;
+                le_timer_SetMsInterval(Timer, ms);
             }
         }
-
-    }
-
-    // Need seperate code for Bool Push Handler - TODO fix with union
-    if (result == LE_OK)
-    {
-        dhubResources[0].ref = dhubIO_AddBooleanPushHandler(dhubResources[0].OutputPath,
-                                                            EnablePushHandler, NULL);
-        if (NULL == dhubResources[0].ref)
-        {
-            LE_ERROR("Failed to add handler for output resource %s", dhubResources[0].OutputPath);
-            result = LE_FAULT;
-        }
-    }
-
-    return result;
-}
-
-//--------------------------------------------------------------------------------------------------
-/**
- * SIGTERM handler to cleanly shutdown
- */
-//--------------------------------------------------------------------------------------------------
-static void actuator_SigTermHandler (int pSigNum)
-{
-    LE_INFO("Remove buzzer resources");
-
-    for (int i = 0; i < ARRAY_SIZE(dhubResources); i++)
-    {
-        dhubIO_DeleteResource(dhubResources[i].OutputPath);
-        dhubIO_DeleteResource(dhubResources[i].InputPath);
     }
 }
 
-
-//--------------------------------------------------------------------------------------------------
-/**
- * Main program
- */
-//--------------------------------------------------------------------------------------------------
 COMPONENT_INIT
 {
-    ///< Catch application termination and shutdown cleanly
-    le_sig_Block(SIGTERM);
-    le_sig_SetEventHandler(SIGTERM, actuator_SigTermHandler);
-    LE_ASSERT(LE_OK == actuator_DhRegister());
-
     Timer = le_timer_Create("Buzzer Timer");
-    le_timer_SetRepeat(Timer, 0);
-    le_timer_SetHandler(Timer, DcHandler);
+    le_timer_SetRepeat(Timer, 0 /* number of iterations, where 0 = infinity */);
+    le_timer_SetHandler(Timer, TimerExpiryHandler);
+
+    LE_ASSERT(LE_OK == dhubIO_CreateOutput(RES_PATH_ENABLE, DHUBIO_DATA_TYPE_BOOLEAN, "1/0"));
+    LE_ASSERT(dhubIO_AddBooleanPushHandler(RES_PATH_ENABLE, EnablePushHandler, NULL));
+    dhubIO_SetBooleanDefault(RES_PATH_ENABLE, Enabled);
+
+    LE_ASSERT(LE_OK == dhubIO_CreateOutput(RES_PATH_FREQ, DHUBIO_DATA_TYPE_NUMERIC, "Hz"));
+    LE_ASSERT(dhubIO_AddNumericPushHandler(RES_PATH_FREQ, FrequencyPushHandler, NULL));
+    dhubIO_SetNumericDefault(RES_PATH_FREQ, Frequency);
+
+    LE_ASSERT(LE_OK == dhubIO_CreateOutput(RES_PATH_PERIOD, DHUBIO_DATA_TYPE_NUMERIC, "s"));
+    LE_ASSERT(dhubIO_AddNumericPushHandler(RES_PATH_PERIOD, PeriodPushHandler, NULL));
+    dhubIO_SetNumericDefault(RES_PATH_PERIOD, ((double)PeriodMs) / 1000.0);
+
+    LE_ASSERT(LE_OK == dhubIO_CreateOutput(RES_PATH_DUTY_CYCLE, DHUBIO_DATA_TYPE_NUMERIC, "%"));
+    LE_ASSERT(dhubIO_AddNumericPushHandler(RES_PATH_DUTY_CYCLE, PercentPushHandler, NULL));
+    dhubIO_SetNumericDefault(RES_PATH_DUTY_CYCLE, DutyCycleOnPercent);
 }
