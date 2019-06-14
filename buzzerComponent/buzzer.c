@@ -1,14 +1,12 @@
 /**
  * This component makes the control of the mangOH Yellow's buzzer available through the Data Hub.
  *
- * The buzzer can cycle on and off over a period of time, and the frequency of the buzzer when it
- * is on (during the ON part of the cycle) can also be controlled independently.
+ * The buzzer can cycle on and off over a period of time.
  *
- * So, if period = 1 second,
- *        duty cycle = 20 %,
- *        frequency = 1024 Hz, and
- *        enable = true
- * then the buzzer will emit a 1.024 kHz sound for 200 ms, turn off for 800 ms, and repeat.
+ * If period = 1 second,
+ *    duty cycle = 20 %,
+ *    enable = true
+ * then the buzzer will emit a sound for 200 ms, turn off for 800 ms, and repeat.
  *
  * If enable is false, then no sound will be emitted, regardless of the other settings.
  *
@@ -27,19 +25,19 @@
 
 // Data Hub resource paths, relative to the app's root.
 #define RES_PATH_ENABLE     "enable"
-#define RES_PATH_FREQ       "frequency"
 #define RES_PATH_PERIOD     "period"
 #define RES_PATH_DUTY_CYCLE "percent"
 
 /// Frequency to use to turn the buzzer off.
 #define BUZZER_OFF_FREQ 0
 
+/// Frequency to use to turn the buzzer on.
+/// The buzzer can physically produce a range of frequencies, but is designed to run at 4kHz.
+/// The RTC chip can produce a set of specific frequencies, the closest of which is 4096Hz.
+#define BUZZER_ON_FREQ 4096
+
 /// Whether the buzzer is enabled or not.
 static bool Enabled = false;
-
-/// The buzzer frequency setpoint in Hz.
-/// @warning This must be one of the valid frequencies, otherwise the driver will reject it.
-static uint Frequency = 1024;
 
 // The on percentage of the buzzer on/off duty cycle (0 to 100).
 static uint DutyCycleOnPercent = 50;
@@ -56,12 +54,12 @@ static bool BuzzerOn = false;
 
 //--------------------------------------------------------------------------------------------------
 /**
- * Makes the buzzer sound at a given frequency in Hz.
+ * Sets the buzzer control on or off.
  */
 //--------------------------------------------------------------------------------------------------
-static void SetBuzzerHz
+static void SetBuzzer
 (
-    uint freq    ///< The buzzer frequency, in Hz. Use BUZZER_OFF_FREQ to stop the buzzer.
+    bool on ///< true = turn the buzzer on, false = turn the buzzer off.
 )
 {
     // Path to the RTC CLKOUT control file in sysfs.
@@ -78,7 +76,7 @@ static void SetBuzzerHz
         }
     }
 
-    if (fprintf(FreqFile, "%d", freq) == -1)
+    if (fprintf(FreqFile, "%d", on ? BUZZER_ON_FREQ : BUZZER_OFF_FREQ) == -1)
     {
         LE_FATAL("Write to file (%s) failed (%m)", BuzzerFreqPath);
     }
@@ -96,7 +94,7 @@ static void SetBuzzerHz
 //--------------------------------------------------------------------------------------------------
 static void StartCycle()
 {
-    SetBuzzerHz(Frequency);
+    SetBuzzer(true);
     BuzzerOn = true;
     le_timer_SetMsInterval(Timer, PeriodMs * DutyCycleOnPercent / 100);
     le_timer_Start(Timer);
@@ -112,7 +110,7 @@ static void StopCycle()
     le_timer_Stop(Timer);
     if (BuzzerOn)
     {
-        SetBuzzerHz(BUZZER_OFF_FREQ);
+        SetBuzzer(false);
         BuzzerOn = false;
     }
 }
@@ -133,7 +131,7 @@ static void TimerExpiryHandler(le_timer_Ref_t timer)
         // If the duty cycle is 100%, then just leave the buzzer on.
         if (DutyCycleOnPercent < 100)
         {
-            SetBuzzerHz(BUZZER_OFF_FREQ);
+            SetBuzzer(false);
             BuzzerOn = false;
 
             uint ms = PeriodMs * (100 - DutyCycleOnPercent) / 100;
@@ -145,7 +143,7 @@ static void TimerExpiryHandler(le_timer_Ref_t timer)
         // If the duty cycle is 0%, then just leave the buzzer off.
         if (DutyCycleOnPercent > 0)
         {
-            SetBuzzerHz(Frequency);
+            SetBuzzer(true);
             BuzzerOn = true;
 
             uint ms = PeriodMs * DutyCycleOnPercent / 100;
@@ -184,63 +182,12 @@ static void EnablePushHandler
 
 //--------------------------------------------------------------------------------------------------
 /**
- * Handler function for frequency setpoint updates from the Data Hub.
- */
-//--------------------------------------------------------------------------------------------------
-static void FrequencyPushHandler (double timestamp, double freq, void *context)
-{
-    if (freq < 0.0)
-    {
-        LE_ERROR("Negative frequency (%lf) ignored.", freq);
-        return;
-    }
-
-    uint intFrequency = (uint)freq;
-
-    // Don't waste any more time if there's no change in the value.
-    if (Frequency == intFrequency)
-    {
-        return;
-    }
-
-    // Only very specific frequencies are supported by the RTC chip:
-    //   1 Hz (below human-audible range)
-    //   1024 Hz
-    //   2048 Hz
-    //   4096 Hz
-    //   8192 Hz
-    //   16384 Hz
-    //   32768 Hz (above human-audible range)
-    switch (intFrequency)
-    {
-        case 1024:
-        case 2048:
-        case 4096:
-        case 8192:
-        case 16384:
-            Frequency = intFrequency;
-            if (BuzzerOn)
-            {
-                SetBuzzerHz(Frequency);
-            }
-            break;
-
-        default:
-            LE_ERROR("Frequency %lf Hz is out of range."
-                     " Only 1024, 2048, 4096, 8192, and 16384 accepted.",
-                     freq);
-            break;
-    }
-}
-
-//--------------------------------------------------------------------------------------------------
-/**
  * Handler function for duty cycle period setpoint updates from the Data Hub.
  */
 //--------------------------------------------------------------------------------------------------
 static void PeriodPushHandler (double timestamp, double period, void *context)
 {
-    // Restricting from 2 sec. to 3600 (i.e. 1 hour)
+    // Restrict the range
     if (period < 0.1 || period > 3600.0)
     {
         LE_ERROR("Received invalid duty cycle period (%lf seconds) - must be between 0.1 & 3600",
@@ -254,8 +201,11 @@ static void PeriodPushHandler (double timestamp, double period, void *context)
             PeriodMs = periodMs;
 
             // If the buzzer is enabled, stop the buzzer and the timer and restart everything.
-            StopCycle();
-            StartCycle();
+            if (Enabled)
+            {
+                StopCycle();
+                StartCycle();
+            }
         }
     }
 }
@@ -280,6 +230,7 @@ static void PercentPushHandler (double timestamp, double percent, void *context)
 
             // If the buzzer is on, it's not too late to update the timer interval in this
             // cycle.  Otherwise, we have to wait for the off period to end before updating.
+            // Also, the buzzer won't be on if it's disabled.
             if (BuzzerOn)
             {
                 uint ms = PeriodMs * DutyCycleOnPercent / 100;
@@ -298,10 +249,6 @@ COMPONENT_INIT
     LE_ASSERT(LE_OK == dhubIO_CreateOutput(RES_PATH_ENABLE, DHUBIO_DATA_TYPE_BOOLEAN, "1/0"));
     LE_ASSERT(dhubIO_AddBooleanPushHandler(RES_PATH_ENABLE, EnablePushHandler, NULL));
     dhubIO_SetBooleanDefault(RES_PATH_ENABLE, Enabled);
-
-    LE_ASSERT(LE_OK == dhubIO_CreateOutput(RES_PATH_FREQ, DHUBIO_DATA_TYPE_NUMERIC, "Hz"));
-    LE_ASSERT(dhubIO_AddNumericPushHandler(RES_PATH_FREQ, FrequencyPushHandler, NULL));
-    dhubIO_SetNumericDefault(RES_PATH_FREQ, Frequency);
 
     LE_ASSERT(LE_OK == dhubIO_CreateOutput(RES_PATH_PERIOD, DHUBIO_DATA_TYPE_NUMERIC, "s"));
     LE_ASSERT(dhubIO_AddNumericPushHandler(RES_PATH_PERIOD, PeriodPushHandler, NULL));
