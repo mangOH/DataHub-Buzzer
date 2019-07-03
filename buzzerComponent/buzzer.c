@@ -265,7 +265,7 @@ COMPONENT_INIT
     le_timer_SetRepeat(Timer, 0 /* number of iterations, where 0 = infinity */);
     le_timer_SetHandler(Timer, TimerExpiryHandler);
 
-    LE_ASSERT(LE_OK == dhubIO_CreateOutput(RES_PATH_ENABLE, DHUBIO_DATA_TYPE_BOOLEAN, "1/0"));
+    LE_ASSERT(LE_OK == dhubIO_CreateOutput(RES_PATH_ENABLE, DHUBIO_DATA_TYPE_BOOLEAN, ""));
     LE_ASSERT(dhubIO_AddBooleanPushHandler(RES_PATH_ENABLE, EnablePushHandler, NULL));
     dhubIO_SetBooleanDefault(RES_PATH_ENABLE, Enabled);
 
