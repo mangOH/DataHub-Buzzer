@@ -92,7 +92,10 @@ static void SetBuzzer
  * Start at the beginning of a duty cycle.
  */
 //--------------------------------------------------------------------------------------------------
-static void StartCycle()
+static void StartCycle
+(
+    void
+)
 {
     SetBuzzer(true);
     BuzzerOn = true;
@@ -105,7 +108,10 @@ static void StartCycle()
  * Disable the buzzer, immediately stopping it, even if it's in the middle of a duty cycle.
  */
 //--------------------------------------------------------------------------------------------------
-static void StopCycle()
+static void StopCycle
+(
+    void
+)
 {
     le_timer_Stop(Timer);
     if (BuzzerOn)
@@ -120,7 +126,10 @@ static void StopCycle()
  * Timer expiry handler function.
  */
 //--------------------------------------------------------------------------------------------------
-static void TimerExpiryHandler(le_timer_Ref_t timer)
+static void TimerExpiryHandler
+(
+    le_timer_Ref_t timer
+)
 {
     // If the buzzer is on, it's time to turn it off and adjust the timer for the off period.
     // Otherwise, it's time to turn it on and restart the timer for the on period.
@@ -185,7 +194,12 @@ static void EnablePushHandler
  * Handler function for duty cycle period setpoint updates from the Data Hub.
  */
 //--------------------------------------------------------------------------------------------------
-static void PeriodPushHandler (double timestamp, double period, void *context)
+static void PeriodPushHandler
+(
+    double timestamp,
+    double period,
+    void *context
+)
 {
     // Restrict the range
     if (period < 0.1 || period > 3600.0)
@@ -215,7 +229,12 @@ static void PeriodPushHandler (double timestamp, double period, void *context)
  * Handler function for the duty cycle percent setpoint updates from the Data Hub.
  */
 //--------------------------------------------------------------------------------------------------
-static void PercentPushHandler (double timestamp, double percent, void *context)
+static void PercentPushHandler
+(
+    double timestamp,
+    double percent,
+    void *context
+)
 {
     if (percent < 0.0 || percent > 100.0)
     {
