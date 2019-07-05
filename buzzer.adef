@@ -1,6 +1,5 @@
 sandboxed: false
 start: auto
-version: 0.1
 
 executables:
 {
@@ -18,7 +17,8 @@ processes:
     {
         LE_LOG_LEVEL = INFO
     }
-    faultAction: stopApp
+
+    faultAction: restart
 }
 
 
