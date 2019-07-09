@@ -261,6 +261,11 @@ static void PercentPushHandler
 
 COMPONENT_INIT
 {
+    // Turn off the buzzer to start.
+    // This not only ensures that the buzzer is off, but it also tests that the buzzer's
+    // sysfs entry is available inside the app sandbox.
+    SetBuzzer(false);
+
     Timer = le_timer_Create("Buzzer Timer");
     le_timer_SetRepeat(Timer, 0 /* number of iterations, where 0 = infinity */);
     le_timer_SetHandler(Timer, TimerExpiryHandler);
