@@ -40,10 +40,10 @@
 static bool Enabled = false;
 
 // The on percentage of the buzzer on/off duty cycle (0 to 100).
-static uint DutyCycleOnPercent = 50;
+static double DutyCycleOnPercent = 50;
 
 // The total number of milliseconds in the full duty cycle period (on + off).
-// Must be >= 100 and <= 3600000 (i.e. 1 hour).
+// Must be >= 10 and <= 3600000 (i.e. 1 hour).
 static uint PeriodMs = 2000;
 
 // The timer used to run the duty cycle
@@ -99,7 +99,12 @@ static void StartCycle
 {
     SetBuzzer(true);
     BuzzerOn = true;
-    le_timer_SetMsInterval(Timer, PeriodMs * DutyCycleOnPercent / 100);
+    uint32_t ms = (uint32_t)(PeriodMs * DutyCycleOnPercent / 100.0);
+    if (ms == 0)
+    {
+        ms = 1;
+    }
+    le_timer_SetMsInterval(Timer, ms);
     le_timer_Start(Timer);
 }
 
@@ -138,24 +143,32 @@ static void TimerExpiryHandler
     if (BuzzerOn)
     {
         // If the duty cycle is 100%, then just leave the buzzer on.
-        if (DutyCycleOnPercent < 100)
+        if (DutyCycleOnPercent < 100.0)
         {
             SetBuzzer(false);
             BuzzerOn = false;
 
-            uint ms = PeriodMs * (100 - DutyCycleOnPercent) / 100;
+            uint32_t ms = (uint32_t)(PeriodMs * (100.0 - DutyCycleOnPercent) / 100.0);
+            if (ms == 0)
+            {
+                ms = 1;
+            }
             le_timer_SetMsInterval(timer, ms);
         }
     }
     else
     {
         // If the duty cycle is 0%, then just leave the buzzer off.
-        if (DutyCycleOnPercent > 0)
+        if (DutyCycleOnPercent > 0.0)
         {
             SetBuzzer(true);
             BuzzerOn = true;
 
-            uint ms = PeriodMs * DutyCycleOnPercent / 100;
+            uint32_t ms = (uint32_t)(PeriodMs * DutyCycleOnPercent / 100.0);
+            if (ms == 0)
+            {
+                ms = 1;
+            }
             le_timer_SetMsInterval(timer, ms);
         }
     }
@@ -202,9 +215,9 @@ static void PeriodPushHandler
 )
 {
     // Restrict the range
-    if (period < 0.1 || period > 3600.0)
+    if (period < 0.01 || period > 3600.0)
     {
-        LE_ERROR("Received invalid duty cycle period (%lf seconds) - must be between 0.1 & 3600",
+        LE_ERROR("Received invalid duty cycle period (%lf seconds) - must be between 0.01 & 3600",
                  period);
     }
     else
@@ -242,17 +255,20 @@ static void PercentPushHandler
     }
     else
     {
-        uint intPercent = (uint)percent;
-        if (DutyCycleOnPercent != intPercent)
+        if (DutyCycleOnPercent != percent)
         {
-            DutyCycleOnPercent = intPercent;
+            DutyCycleOnPercent = percent;
 
             // If the buzzer is on, it's not too late to update the timer interval in this
             // cycle.  Otherwise, we have to wait for the off period to end before updating.
             // Also, the buzzer won't be on if it's disabled.
             if (BuzzerOn)
             {
-                uint ms = PeriodMs * DutyCycleOnPercent / 100;
+                uint32_t ms = (uint32_t)(PeriodMs * DutyCycleOnPercent / 100.0);
+                if (ms == 0)
+                {
+                    ms = 1;
+                }
                 le_timer_SetMsInterval(Timer, ms);
             }
         }
