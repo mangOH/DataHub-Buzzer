@@ -40,7 +40,7 @@
 static bool Enabled = false;
 
 // The on percentage of the buzzer on/off duty cycle (0 to 100).
-static double DutyCycleOnPercent = 50;
+static double DutyCycleOnPercent = 100;
 
 // The total number of milliseconds in the full duty cycle period (on + off).
 // Must be >= 10 and <= 3600000 (i.e. 1 hour).
